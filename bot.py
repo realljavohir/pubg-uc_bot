@@ -5,12 +5,13 @@ import sqlite3
 from datetime import datetime
 import uuid
 import asyncio
+import os
 
 # 1. BOT TOKEN - @BotFather dan olgan tokeningizni qo'ying
-TOKEN = "8295217817:AAG1tB9Izs-8RIuL-4_m7OVeDqNLZDdONqI"  # O'Z TOKENINGIZNI YOZING
+TOKEN = os.environ.get("BOT_TOKEN", "8295217817:AAG1tB9Izs-8RIuL-4_m7OVeDqNLZDdONqI")
 
 # 2. ADMIN ID - @userinfobot dan olgan ID ingizni qo'ying
-ADMIN_ID = 6713905538  # O'Z ID INGIZNI YOZING
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "6713905538"))
 
 # Logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -291,6 +292,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📦 Buyurtmalar", callback_data="admin_orders")],
         [InlineKeyboardButton("👥 Foydalanuvchilar", callback_data="admin_users")],
         [InlineKeyboardButton("➕ Mahsulot qo'shish", callback_data="admin_add_product")],
+        [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast")],
         [InlineKeyboardButton("🔙 Orqaga", callback_data="main_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -602,6 +604,95 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in admin_users: {e}")
         await query.edit_message_text("Xatolik yuz berdi.")
 
+# 📢 Broadcast - xabar yuborish
+async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    await query.edit_message_text(
+        "📢 **Barcha foydalanuvchilarga yuboriladigan xabar**\n\n"
+        "Xabarni yozing (matn, rasm, video, hujjat):\n"
+        "Bekor qilish uchun /cancel yozing"
+    )
+    context.user_data['waiting_broadcast'] = True
+
+# Broadcast uchun xabarni qabul qilish
+async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('waiting_broadcast'):
+        return
+    
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        return
+    
+    # Barcha foydalanuvchilarni olish
+    conn = sqlite3.connect('pubg_uc_bot.db')
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM users")
+    users = c.fetchall()
+    conn.close()
+    
+    await update.message.reply_text(f"⏳ Xabar {len(users)} foydalanuvchiga yuborilmoqda...")
+    
+    success = 0
+    failed = 0
+    
+    for user_id in users:
+        try:
+            # Matn xabar
+            if update.message.text:
+                await context.bot.send_message(chat_id=user_id[0], text=update.message.text)
+            # Rasm xabar
+            elif update.message.photo:
+                await context.bot.send_photo(
+                    chat_id=user_id[0],
+                    photo=update.message.photo[-1].file_id,
+                    caption=update.message.caption or ""
+                )
+            # Video
+            elif update.message.video:
+                await context.bot.send_video(
+                    chat_id=user_id[0],
+                    video=update.message.video.file_id,
+                    caption=update.message.caption or ""
+                )
+            # Hujjat
+            elif update.message.document:
+                await context.bot.send_document(
+                    chat_id=user_id[0],
+                    document=update.message.document.file_id,
+                    caption=update.message.caption or ""
+                )
+            
+            success += 1
+            await asyncio.sleep(0.05)  # Telegram limiti uchun
+        except Exception as e:
+            failed += 1
+            logger.error(f"Broadcast xatolik {user_id[0]}: {e}")
+    
+    # Adminga hisobot
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=f"✅ **Broadcast tugadi!**\n\n"
+             f"📊 **Natija:**\n"
+             f"• Yuborildi: {success}\n"
+             f"• Xatolik: {failed}\n"
+             f"• Jami: {len(users)}"
+    )
+    
+    context.user_data.pop('waiting_broadcast')
+
+# /cancel komandasi
+async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('waiting_broadcast'):
+        context.user_data.pop('waiting_broadcast')
+        await update.message.reply_text("❌ Broadcast bekor qilindi.")
+    else:
+        await update.message.reply_text("Faol broadcast yo'q.")
+
 # Handle product addition
 async def handle_product_addition(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('adding_product') and update.effective_user.id == ADMIN_ID:
@@ -641,7 +732,7 @@ async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
 
-# Main function - PYTHON 3.14 UCHUN TO'G'RILANGAN
+# Main function
 async def main():
     init_db()
     
@@ -649,6 +740,7 @@ async def main():
     
     # Command handlers
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("cancel", cancel_broadcast))
     
     # Callback handlers
     application.add_handler(CallbackQueryHandler(buy_uc, pattern="^buy_uc$"))
@@ -660,13 +752,20 @@ async def main():
     application.add_handler(CallbackQueryHandler(admin_orders, pattern="^admin_orders$"))
     application.add_handler(CallbackQueryHandler(admin_add_product, pattern="^admin_add_product$"))
     application.add_handler(CallbackQueryHandler(admin_users, pattern="^admin_users$"))
+    application.add_handler(CallbackQueryHandler(admin_broadcast, pattern="^admin_broadcast$"))
     application.add_handler(CallbackQueryHandler(select_product, pattern="^select_product_"))
     application.add_handler(CallbackQueryHandler(confirm_order, pattern="^confirm_order$"))
     application.add_handler(CallbackQueryHandler(payment, pattern="^pay_"))
     application.add_handler(CallbackQueryHandler(approve_order, pattern="^approve_order_"))
     application.add_handler(CallbackQueryHandler(reject_order, pattern="^reject_order_"))
     
-    # Message handlers
+    # Message handlers - MUHIM: broadcast birinchi tekshiriladi
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_broadcast_message))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_broadcast_message))
+    application.add_handler(MessageHandler(filters.VIDEO, handle_broadcast_message))
+    application.add_handler(MessageHandler(filters.DOCUMENT, handle_broadcast_message))
+    
+    # Keyin boshqa handlerlar
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_product_addition))
     application.add_handler(MessageHandler(filters.PHOTO, handle_payment_proof))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_payment_proof))
@@ -678,26 +777,23 @@ async def main():
     print(f"👨‍💼 Admin ID: {ADMIN_ID}")
     print(f"🔑 Token: {TOKEN[:10]}...")
     print("📊 Bot ishlamoqda...")
+    print("🛑 Botni to'xtatish uchun Ctrl+C ni bosing")
     
-    # Python 3.14 uchun to'g'ri ishga tushirish
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
     
-    # Botni to'xtatishgacha ishlatish
     try:
-        # Infinite loop
         while True:
-            await asyncio.sleep(1)  # 1 soat uxlab, qayta tekshirish
+            await asyncio.sleep(3600)
     except KeyboardInterrupt:
-        # Ctrl+C bosilganda
         print("\n🛑 Bot to'xtatilmoqda...")
         await application.updater.stop()
         await application.stop()
         await application.shutdown()
+        print("✅ Bot to'xtatildi")
 
 if __name__ == '__main__':
-    # Python 3.14 uchun event loop yaratish
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
